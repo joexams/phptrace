@@ -21,6 +21,14 @@
 #include "php.h"
 #include "php_ini.h"
 #include "ext/standard/info.h"
+
+#if PHP_VERSION_ID < 70000
+    #include "ext/standard/php_smart_str.h"
+#else
+    #include "zend_smart_str_public.h"
+#endif
+#include "ext/json/php_json.h"
+
 #include "php_trace.h"
 
 #include "zend_extensions.h"
@@ -32,7 +40,7 @@
 #include "sds/sds.h"
 #include "trace_filter.h"
 
-
+#define REPR_ZVAL_LIMIT 32
 /**
  * Trace Global
  * --------------------
@@ -722,7 +730,7 @@ static void frame_build(pt_frame_t *frame, zend_bool internal, unsigned char typ
 
 #if PHP_VERSION_ID < 70000
         for (i = 0; i < frame->arg_count; i++) {
-            frame->args[i] = repr_zval(args[i], 32 TSRMLS_CC);
+            frame->args[i] = repr_zval(args[i], REPR_ZVAL_LIMIT TSRMLS_CC);
         }
 #else
         if (frame->arg_count) {
@@ -733,13 +741,13 @@ static void frame_build(pt_frame_t *frame, zend_bool internal, unsigned char typ
 
                 if (first_extra_arg && frame->arg_count > first_extra_arg) {
                     while (i < first_extra_arg) {
-                        frame->args[i++] = repr_zval(p++, 32);
+                        frame->args[i++] = repr_zval(p++, REPR_ZVAL_LIMIT);
                     }
                     p = ZEND_CALL_VAR_NUM(ex, ex->func->op_array.last_var + ex->func->op_array.T);
                 }
             }
             while(i < frame->arg_count) {
-                frame->args[i++] = repr_zval(p++, 32);
+                frame->args[i++] = repr_zval(p++, REPR_ZVAL_LIMIT);
             }
         }
 #endif
@@ -901,7 +909,7 @@ static void frame_set_retval(pt_frame_t *frame, zend_bool internal, zend_execute
     }
 
     if (retval) {
-        frame->retval = repr_zval(retval, 32 TSRMLS_CC);
+        frame->retval = repr_zval(retval, REPR_ZVAL_LIMIT TSRMLS_CC);
     }
 }
 #endif
@@ -1048,6 +1056,7 @@ static sds repr_zval(zval *zv, int limit TSRMLS_DC)
     int tlen = 0;
     char buf[256], *tstr = NULL;
     sds result;
+    smart_str sbuf = {0};
 
 #if PHP_VERSION_ID >= 70000
     zend_string *class_name;
@@ -1085,8 +1094,13 @@ again:
             }
             return result;
         case IS_ARRAY:
-            /* TODO more info */
-            return sdscatprintf(sdsempty(), "array(%d)", zend_hash_num_elements(Z_ARRVAL_P(zv)));
+#if PHP_VERSION_ID < 70000      
+            php_json_encode(&sbuf, zv, 0 TSRMLS_DC);
+            return sdscatprintf(sdsempty(), "a2json(%s)", sbuf.c);
+#else
+            php_json_encode(&sbuf, zv, 0);
+            return sdscatprintf(sdsempty(), "a2json(%s)", ZSTR_VAL(sbuf.s));
+#endif
         case IS_OBJECT:
 #if PHP_VERSION_ID < 70000
             if (Z_OBJ_HANDLER(*zv, get_class_name)) {
@@ -1361,9 +1375,9 @@ ZEND_API void pt_execute_core(int internal, zend_execute_data *execute_data, zva
             frame_set_retval(&frame, internal, execute_data, fci TSRMLS_CC);
 #else
             if (return_value) { /* internal */
-                frame.retval = repr_zval(return_value, 32);
+                frame.retval = repr_zval(return_value, REPR_ZVAL_LIMIT);
             } else if (execute_data->return_value) { /* user function */
-                frame.retval = repr_zval(execute_data->return_value, 32);
+                frame.retval = repr_zval(execute_data->return_value, REPR_ZVAL_LIMIT);
             }
 #endif
         }
